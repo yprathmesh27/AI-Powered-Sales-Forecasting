@@ -1,95 +1,161 @@
 import streamlit as st
-import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import load_model
-import plotly.graph_objects as go
+import pandas as pd
 import joblib
+import tensorflow as tf
+import plotly.graph_objects as go
+import os
 
-# Load your trained model and scaler
-model = load_model('lstm_model.h5')
-sc = joblib.load('scaler.pkl')
+# ------------------------------------------------------------
+# PAGE CONFIGURATION
+# ------------------------------------------------------------
+st.set_page_config(
+    page_title="AI Sales Forecasting Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Function to split the dataset into train and test sets
-def train_test_split(df, train_end, test_end):
-    train_end = pd.to_datetime(train_end)
-    test_end = pd.to_datetime(test_end)
-    
-    train_set = df[df.index <= train_end]
-    test_set = df[(df.index > train_end) & (df.index <= test_end)]
-    return train_set, test_set
+# ------------------------------------------------------------
+# LOAD MODEL AND SCALER
+# ------------------------------------------------------------
+MODEL_PATH = "lstm_model.keras"
+SCALER_PATH = "scaler.pkl"
 
-# Function to create lookback dataset
-def lookback(df, window):
-    X, Y = [], []
-    for i in range(window, len(df)):
-        X.append(df[i-window:i, 0])
-        Y.append(df[i,0])
-    return np.array(X), np.array(Y)
+model, scaler = None, None
 
-# Streamlit UI
-st.title('Sales Forecasting using LSTM')
-data = pd.read_hdf('final_data.h5', key = 'df')
+try:
+    model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+    scaler = joblib.load(SCALER_PATH)
+    st.success("Model and Scaler loaded successfully!")
+except Exception as e:
+    st.error(f"Error loading model/scaler: {e}")
 
-# Pre-set dates for splitting data
-train_end = '2018-04-30'
-test_end = '2018-08-29'
+# ------------------------------------------------------------
+# SIDEBAR INPUT PARAMETERS
+# ------------------------------------------------------------
+st.sidebar.title("Input Parameters")
+st.sidebar.write("Adjust parameters below to predict future sales:")
 
-# Split the data without user input
-train_df, test_df = train_test_split(data, train_end, test_end)
+price = st.sidebar.number_input("Product Price", min_value=0.0, value=250.0)
+freight = st.sidebar.number_input("Freight Value", min_value=0.0, value=50.0)
+payment = st.sidebar.number_input("Payment Value", min_value=0.0, value=500.0)
 
-train_df_scaled = sc.fit_transform(train_df[['total_amount']])
-test_df_scaled = sc.transform(test_df[['total_amount']])
+# ------------------------------------------------------------
+# MAIN PAGE CONTENT
+# ------------------------------------------------------------
+st.title("AI-Powered Sales Forecasting Dashboard")
+st.markdown("Predict and visualize business growth trends using AI-based forecasting models.")
 
-# Lookback
-window = 1  # Replace with your desired window size
-X_train, y_train = lookback(train_df_scaled, window)
-X_test, y_test = lookback(test_df_scaled, window)
+# ------------------------------------------------------------
+# SALES PREDICTION SECTION
+# ------------------------------------------------------------
+st.subheader("Sales Prediction")
 
-# Reshape X for LSTM
-X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
-X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+predicted_value = None
 
-# Reshape X for LSTM
-X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
-X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+if st.button("Predict Sales") and model and scaler:
+    try:
+        input_data = np.array([[price, freight, payment]])
+        scaled_input = scaler.transform(input_data)
+        reshaped_input = scaled_input.reshape((1, 1, scaled_input.shape[1]))
 
-# Generate predictions
-y_pred = model.predict(X_test)
+        prediction_scaled = model.predict(reshaped_input)
+        padding = np.zeros((1, scaled_input.shape[1] - 1))
+        padded_output = np.concatenate([prediction_scaled, padding], axis=1)
+        predicted_value = scaler.inverse_transform(padded_output)[0][0]
 
-y_test_actual = sc.inverse_transform(y_test.reshape(-1, 1))
-y_pred_actual = sc.inverse_transform(y_pred)
+        st.success(f"Predicted Sales Value: ₹ {predicted_value:.2f}")
 
-# ... previous code ...
+    except Exception as e:
+        st.error(f"Prediction failed: {e}")
 
-# Forecast future values
-def forecast_future(model, last_window, n_days):
-    future_predictions_scaled = []
-    current_batch = last_window[-window:].reshape(1, window, 1)
+# ------------------------------------------------------------
+# DATA UPLOAD SECTION
+# ------------------------------------------------------------
+st.subheader("Data Insights Visualization")
+uploaded_file = st.file_uploader("Upload a dataset (CSV)", type=["csv"])
 
-    for i in range(n_days):
-        # Get the next prediction
-        future_pred = model.predict(current_batch)
-        future_predictions_scaled.append(future_pred[0, 0])
-        
-        # Update batch to include the next prediction and drop first value
-        current_batch = np.append(current_batch[:, 1:, :], [[future_pred[0]]], axis=1)
+if uploaded_file is not None:
+    try:
+        df = pd.read_csv(uploaded_file)
+        st.success(f"File uploaded successfully: {uploaded_file.name}")
+        st.dataframe(df.head())
 
-    return np.array(future_predictions_scaled)
+        # Try to find a valid sales-related column or compute one
+        sales_col = None
+        possible_sales_cols = ["total_amount", "payment_value", "sales_value", "revenue", "amount"]
 
-# Number of days to forecast
-st.title("Forecast Input after test set")
-forecast_days = st.number_input("Enter number of days to forecast:", min_value=1, value=121, max_value = 150)
-extended_index = pd.date_range(start=test_df.index[-1], periods=forecast_days)
+        for col in possible_sales_cols:
+            if col in df.columns:
+                sales_col = col
+                break
 
-# Plotting actual vs predicted values
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=test_df.index, y=y_test_actual.flatten(), mode='lines', name='Actual'))
-fig.add_trace(go.Scatter(x=test_df.index, y=y_pred_actual.flatten(), mode='lines', name='Predicted'))
-# Plotting actual vs predicted values with forecast
-fig.add_trace(go.Scatter(x=extended_index, y=y_pred_actual.flatten(), mode='lines', name='Forecast', line=dict(color='red')))
-fig.update_layout(title='Actual vs Predicted Values',
-                  xaxis_title='Date',
-                  yaxis_title='Value',
-                  legend_title='Legend')
-st.plotly_chart(fig)
+        # If no direct sales column, create one if price + freight_value exist
+        if sales_col is None and all(c in df.columns for c in ["price", "freight_value"]):
+            df["total_sales"] = df["price"] + df["freight_value"]
+            sales_col = "total_sales"
+            st.info("Computed 'total_sales' from price + freight_value.")
+
+        if sales_col:
+            st.write(f"Detected sales column: **{sales_col}**")
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                y=df[sales_col].head(1000),  # limit for performance
+                mode="lines+markers",
+                name="Actual Sales",
+                line=dict(color="lightgreen", width=2)
+            ))
+
+            if predicted_value is not None:
+                fig.add_trace(go.Scatter(
+                    x=[len(df)],
+                    y=[predicted_value],
+                    mode="markers+text",
+                    text=["Predicted"],
+                    textposition="top center",
+                    name="Predicted Sales",
+                    marker=dict(color="magenta", size=10)
+                ))
+
+            fig.update_layout(
+                title="Actual vs Predicted Sales",
+                xaxis_title="Order Index",
+                yaxis_title="Sales Value (₹)",
+                template="plotly_dark",
+                height=450
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            st.warning(
+                "No valid sales-related column found. "
+                "Try uploading a dataset containing either 'total_amount', 'payment_value', 'price', or 'freight_value'."
+            )
+
+    except Exception as e:
+        st.error(f"Error loading or visualizing file: {e}")
+else:
+    st.info("Upload a CSV file to view the visualization.")
+
+# ------------------------------------------------------------
+# ABOUT SECTION
+# ------------------------------------------------------------
+st.markdown("---")
+st.subheader("About this Project")
+
+st.markdown("""
+AI-Powered Sales Forecasting Dashboard uses an LSTM neural network  
+to predict and visualize future sales based on historical data.
+
+Frameworks: TensorFlow · Streamlit · Pandas · Plotly  
+Developer: Prathmesh Yadav  
+Version: 2.0  
+""")
+
+st.markdown("""
+<hr style="border: 0.5px solid #666;">
+<div style="text-align:center; font-size:13px; color:#999;">
+© 2025 Prathmesh Yadav | AI-Powered Sales Analysis Dashboard
+</div>
+""", unsafe_allow_html=True)
